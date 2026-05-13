@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GRX/NUTRI</title>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Barlow+Condensed:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <style>
 :root{
   --bg:#0a0a0a;--surface:#111;--surface2:#1a1a1a;--surface3:#222;
@@ -331,9 +332,56 @@ select.op3{background:var(--amber-bg);border-color:var(--amber);color:var(--ambe
   .routine-card { padding:12px; }
   .rt-time { font-size:1.9rem; }
 }
+/* LOGIN OVERLAY */
+.auth-overlay { position:fixed; inset:0; background:var(--bg); z-index:200; display:none; align-items:center; justify-content:center; padding:20px; }
+.auth-overlay.active { display:flex; }
+.auth-card { background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:28px 24px; width:100%; max-width:380px; }
+.auth-logo { font-family:'Space Mono',monospace; font-size:1.4rem; color:var(--accent); text-align:center; margin-bottom:6px; letter-spacing:-0.02em; }
+.auth-logo span { color:var(--text-dim); }
+.auth-tagline { font-size:12px; color:var(--text-dim); text-align:center; margin-bottom:22px; letter-spacing:0.04em; }
+.auth-card label { font-size:11px; color:var(--text-dim); letter-spacing:0.08em; text-transform:uppercase; display:block; margin-bottom:5px; }
+.auth-card input { font-size:15px; padding:10px 12px; margin-bottom:14px; }
+.auth-btn { width:100%; padding:11px; font-size:13px; }
+.auth-status { font-size:12px; margin-top:14px; text-align:center; min-height:16px; line-height:1.4; }
+.auth-status.success { color:var(--accent); }
+.auth-status.error { color:var(--red); }
+.auth-info { font-size:11px; color:var(--text-dim); margin-top:18px; padding-top:14px; border-top:1px solid var(--border); line-height:1.5; }
+
+/* SYNC INDICATOR */
+.sync-bar { display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; font-size:11px; color:var(--text-dim); margin-bottom:14px; }
+.sync-dot { width:8px; height:8px; border-radius:50%; background:var(--text-dim); }
+.sync-bar.online .sync-dot { background:var(--accent); box-shadow:0 0 6px var(--accent); }
+.sync-bar.syncing .sync-dot { background:var(--blue); animation:sync-pulse 1s infinite; }
+.sync-bar.error .sync-dot { background:var(--red); }
+@keyframes sync-pulse { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+.sync-email { font-weight:600; color:var(--text-mid); }
+.sync-actions { margin-left:auto; display:flex; gap:6px; }
+.sync-actions button { font-size:10px; padding:3px 8px; border-radius:3px; border:1px solid var(--border2); background:none; color:var(--text-dim); cursor:pointer; font-family:inherit; letter-spacing:0.05em; text-transform:uppercase; font-weight:700; }
+.sync-actions button:hover { color:var(--text); border-color:var(--border2); }
+
 </style>
 </head>
 <body>
+<!-- LOGIN OVERLAY -->
+<div class="auth-overlay" id="auth-overlay">
+  <div class="auth-card">
+    <div class="auth-logo">GRX<span>/</span>NUTRI</div>
+    <div class="auth-tagline">Tu app de nutrición y entrenamiento</div>
+
+    <label for="auth-email">Tu email</label>
+    <input type="email" id="auth-email" placeholder="tucorreo@ejemplo.com" autocomplete="email">
+
+    <button class="btn primary auth-btn" onclick="sendMagicLink()">📧 Enviarme enlace de acceso</button>
+
+    <div class="auth-status" id="auth-status"></div>
+
+    <div class="auth-info">
+      <strong style="color:var(--text-mid);">¿Cómo funciona?</strong><br>
+      Te enviaremos un enlace a tu email. Pulsa ese enlace y entrarás automáticamente — no necesitas contraseña. Tus datos se sincronizarán entre todos los dispositivos donde inicies sesión.
+    </div>
+  </div>
+</div>
+
 <div class="app">
 <div class="header">
   <div class="logo">GRX<span>/</span>NUTRI</div>
@@ -344,6 +392,17 @@ select.op3{background:var(--amber-bg);border-color:var(--amber);color:var(--ambe
     <button class="nav-btn" onclick="showSection('equiv')">Equivalencias</button>
     <button class="nav-btn" onclick="showSection('entreno')">Entrenamiento</button>
   </nav>
+</div>
+
+<!-- SYNC BAR -->
+<div class="sync-bar" id="sync-bar" style="display:none;">
+  <span class="sync-dot"></span>
+  <span id="sync-status-text">—</span>
+  <span class="sync-email" id="sync-email"></span>
+  <div class="sync-actions">
+    <button onclick="syncNow()" title="Sincronizar ahora">↻ Sync</button>
+    <button onclick="signOut()" title="Cerrar sesión">Salir</button>
+  </div>
 </div>
 
 <!-- PERFIL -->
@@ -2265,9 +2324,243 @@ function openModal(id) { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
 /* ═══════════════════════════════════════
+   SUPABASE — Autenticación y sincronización cloud
+═══════════════════════════════════════ */
+const SUPABASE_URL = 'https://mtpadwrermenqpcizjrs.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im10cGFkd3Jlcm1lbnFwY2l6anJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg2NDU2ODEsImV4cCI6MjA5NDIyMTY4MX0.cWuSa9u3D-zAeq9ZJi-BNm9St9ihAZP8a3WRXiZtDtQ';
+
+let supabase = null;
+let currentUser = null;
+let isSyncing = false;
+let syncDebounceTimer = null;
+let lastLocalChange = 0;
+
+function initSupabase() {
+  if (!window.supabase) {
+    console.error('Supabase SDK no cargado');
+    return false;
+  }
+  supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  return true;
+}
+
+async function checkAuth() {
+  if (!supabase) return null;
+  const { data: { session } } = await supabase.auth.getSession();
+  return session ? session.user : null;
+}
+
+function setAuthStatus(msg, type) {
+  const el = document.getElementById('auth-status');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.className = 'auth-status ' + (type || '');
+}
+
+async function sendMagicLink() {
+  const emailEl = document.getElementById('auth-email');
+  const email = (emailEl.value || '').trim();
+  if (!email || !email.includes('@')) {
+    setAuthStatus('Introduce un email válido', 'error');
+    return;
+  }
+  setAuthStatus('Enviando enlace…', '');
+  try {
+    const redirectTo = window.location.origin + window.location.pathname;
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: redirectTo }
+    });
+    if (error) throw error;
+    setAuthStatus('✓ Revisa tu email y pulsa el enlace que recibirás. Puede tardar 1-2 minutos.', 'success');
+  } catch (e) {
+    setAuthStatus('❌ Error: ' + (e.message || 'no se pudo enviar'), 'error');
+  }
+}
+
+async function signOut() {
+  if (!supabase) return;
+  if (!confirm('¿Cerrar sesión? Tus datos quedarán en este navegador, pero no se sincronizarán hasta que vuelvas a entrar.')) return;
+  await supabase.auth.signOut();
+  currentUser = null;
+  showAuthOverlay();
+}
+
+function showAuthOverlay() {
+  document.getElementById('auth-overlay').classList.add('active');
+  document.querySelector('.app').style.display = 'none';
+  document.getElementById('sync-bar').style.display = 'none';
+}
+
+function hideAuthOverlay() {
+  document.getElementById('auth-overlay').classList.remove('active');
+  document.querySelector('.app').style.display = '';
+  document.getElementById('sync-bar').style.display = '';
+}
+
+function setSyncStatus(state, msg) {
+  const bar = document.getElementById('sync-bar');
+  const text = document.getElementById('sync-status-text');
+  if (!bar || !text) return;
+  bar.classList.remove('online','syncing','error');
+  if (state) bar.classList.add(state);
+  text.textContent = msg || '';
+  const emailEl = document.getElementById('sync-email');
+  if (emailEl && currentUser) emailEl.textContent = '· ' + currentUser.email;
+}
+
+async function pullFromCloud() {
+  if (!supabase || !currentUser) return null;
+  try {
+    setSyncStatus('syncing', 'Sincronizando…');
+    const { data, error } = await supabase
+      .from('user_data')
+      .select('data, updated_at')
+      .eq('user_id', currentUser.id)
+      .maybeSingle();
+    if (error) throw error;
+    setSyncStatus('online', 'Sincronizado');
+    return data; // { data: {...}, updated_at: '...' } | null
+  } catch (e) {
+    console.error('pullFromCloud:', e);
+    setSyncStatus('error', 'Error al cargar');
+    return null;
+  }
+}
+
+async function pushToCloud() {
+  if (!supabase || !currentUser) return;
+  if (isSyncing) return;
+  isSyncing = true;
+  try {
+    setSyncStatus('syncing', 'Guardando en la nube…');
+    const snapshot = buildSnapshot();
+    const { error } = await supabase
+      .from('user_data')
+      .upsert({ user_id: currentUser.id, data: snapshot }, { onConflict: 'user_id' });
+    if (error) throw error;
+    setSyncStatus('online', 'Sincronizado');
+  } catch (e) {
+    console.error('pushToCloud:', e);
+    setSyncStatus('error', 'Error al guardar');
+  } finally {
+    isSyncing = false;
+  }
+}
+
+/* Llamada que dispara una sincronización con debounce de 2 segundos */
+function queueSync() {
+  if (!currentUser) return;
+  lastLocalChange = Date.now();
+  if (syncDebounceTimer) clearTimeout(syncDebounceTimer);
+  syncDebounceTimer = setTimeout(() => { pushToCloud(); }, 2000);
+}
+
+async function syncNow() {
+  if (!currentUser) return;
+  if (syncDebounceTimer) { clearTimeout(syncDebounceTimer); syncDebounceTimer = null; }
+  await pushToCloud();
+}
+
+/* Hook de localStorage.setItem para que cada escritura dispare sync */
+function hookLocalStorageForSync() {
+  const origSet = Storage.prototype.setItem;
+  Storage.prototype.setItem = function(key, val) {
+    origSet.apply(this, arguments);
+    /* Solo sincronizar claves de nuestra app */
+    if (key === KEY_PROFILE || key === KEY_PLAN || key === KEY_TRACKER || key === KEY_WORKOUT) {
+      queueSync();
+    }
+  };
+}
+
+async function bootstrapApp() {
+  /* 1. Inicializar Supabase */
+  if (!initSupabase()) {
+    /* SDK no cargado: mostrar overlay con aviso, no entrar a la app en modo offline */
+    showAuthOverlay();
+    setAuthStatus('⚠️ No se pudo cargar el SDK de Supabase. Comprueba tu conexión a internet o desactiva bloqueadores de anuncios y recarga la página.', 'error');
+    /* Aún así, cargamos los datos locales por si quiere usar Export/Import */
+    loadAll();
+    return;
+  }
+
+  /* 2. Comprobar si hay sesión activa (puede venir del magic link) */
+  currentUser = await checkAuth();
+
+  /* 3. Escuchar cambios de auth (después de pulsar magic link) */
+  supabase.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'SIGNED_IN' && session) {
+      currentUser = session.user;
+      await onSignedIn();
+    } else if (event === 'SIGNED_OUT') {
+      currentUser = null;
+      showAuthOverlay();
+    }
+  });
+
+  if (currentUser) {
+    await onSignedIn();
+  } else {
+    showAuthOverlay();
+    /* Mientras tanto, no cargar la app */
+  }
+}
+
+async function onSignedIn() {
+  hideAuthOverlay();
+  setSyncStatus('syncing', 'Cargando datos…');
+
+  /* Limpiar URL si tiene hash con tokens del magic link */
+  if (window.location.hash && window.location.hash.includes('access_token')) {
+    history.replaceState(null, '', window.location.pathname);
+  }
+
+  /* 1. Cargar lo que haya en localStorage primero */
+  loadAll();
+
+  /* 2. Intentar bajar de la nube */
+  const cloudRow = await pullFromCloud();
+
+  if (cloudRow && cloudRow.data && Object.keys(cloudRow.data).length > 0) {
+    /* Hay datos en la nube */
+    const cloudData = cloudRow.data;
+    const localHasData = (profile && (profile.weight || profile.bf)) || (plan && plan.mealTypes && plan.mealTypes.length > 0) || (workoutData && workoutData.sessions && workoutData.sessions.length > 0);
+
+    if (!localHasData) {
+      /* Local está vacío → aplicar directamente la nube */
+      applyImportedData(cloudData);
+      setSyncStatus('online', 'Datos cargados desde la nube');
+    } else {
+      /* Hay datos locales Y en la nube → preguntar */
+      const cloudDate = new Date(cloudRow.updated_at).toLocaleString('es-ES');
+      const useCloud = confirm('Hay datos en la nube guardados el ' + cloudDate + '.\n\n¿Quieres CARGAR los datos de la nube y sobrescribir lo que tienes en este dispositivo?\n\n• Aceptar = usar los de la nube\n• Cancelar = mantener los de este dispositivo y subirlos a la nube');
+      if (useCloud) {
+        applyImportedData(cloudData);
+        setSyncStatus('online', 'Datos cargados desde la nube');
+      } else {
+        /* Mantener locales y subirlos */
+        await pushToCloud();
+      }
+    }
+  } else {
+    /* Sin datos en la nube → si hay locales, subirlos */
+    const localHasData = (profile && (profile.weight || profile.bf)) || (plan && plan.mealTypes && plan.mealTypes.length > 0);
+    if (localHasData) {
+      await pushToCloud();
+    } else {
+      setSyncStatus('online', 'Listo');
+    }
+  }
+
+  /* Hookear localStorage para sincronización continua */
+  hookLocalStorageForSync();
+}
+
+/* ═══════════════════════════════════════
    START
 ═══════════════════════════════════════ */
-loadAll();
+bootstrapApp();
 </script>
 </div>
 </body>
